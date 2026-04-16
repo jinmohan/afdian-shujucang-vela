@@ -1,0 +1,982 @@
+<template>
+  <div class="page-container">
+    
+    <div class="view-loading" if="{{isLoading}}">
+      <div class="dialog-bg">
+        <div class="loading-content">
+          <stack class="circle-stack">
+            <div class="outer-ring"></div>
+            <div class="inner-dot" style="margin-left: {{dotX}}px; margin-top: {{dotY}}px;"></div>
+          </stack>
+        </div>
+        <text class="loading-title">正在处理数据中</text>
+      </div>
+    </div>
+
+    <div class="view-login" if="{{currentView === 'login' && !isLoading}}">
+      <div class="global-header">
+        <text class="header-left">设备认证</text>
+        <text class="header-right">{{currentTime}}</text>
+      </div>
+
+      <div class="login-container">
+        <div if="{{!qrUrl}}" class="qr-placeholder">
+          <text class="loading-text">加载安全通道...</text>
+        </div>
+        <qrcode if="{{qrUrl}}" value="{{qrUrl}}" class="qrcode"></qrcode>
+        
+        <text class="status-msg">{{statusMsg}}</text>
+        
+        <div class="action-area" style="margin-top: 30px;">
+          <text class="qrbtn btn-secondary" onclick="initSecureSession">刷新二维码</text>
+          <text class="btn btn-secondary" if="{{hasOldCookie}}" onclick="goView('main')">返回主页</text>
+        </div>
+      </div>
+    </div>
+
+    <div class="view-main" if="{{currentView === 'main' && !isLoading}}">
+      <div class="global-header" style="position: relative; top: {{mainOffsets[0]}}px;">
+        <text class="header-left">爱发电数据仓</text>
+        <text class="header-right">{{currentTime}}</text>
+      </div>
+
+      <div class="dashboard" style="position: relative; top: {{mainOffsets[1]}}px;">
+        <div class="stat-box">
+          <text class="stat-title">总销售额(￥)</text>
+          <text class="stat-value highlight">{{displayRevenue}}</text>
+        </div>
+        <div class="stat-box">
+          <text class="stat-title">历史总销量</text>
+          <text class="stat-value">{{displaySales}}</text>
+        </div>
+      </div>
+      
+      <div class="dashboard dashboard-secondary" style="position: relative; top: {{mainOffsets[2]}}px;">
+        <div class="stat-box clickable-box" onclick="goView('chart')">
+          <text class="stat-title">售卖统计</text>
+          <text class="stat-value-small">{{saleList.length}} 个</text>
+        </div>
+        <div class="stat-box">
+          <text class="stat-title">赞助方案</text>
+          <text class="stat-value-small">{{sponsorList.length}} 个</text>
+        </div>
+      </div>
+
+      <div class="action-area" style="position: relative; top: {{mainOffsets[3]}}px;">
+        <text class="btn" onclick="fetchData">刷新网络数据</text>
+        <text class="btn btn-secondary" onclick="goView('products')">商城商品信息</text>
+        </div>
+    </div>
+
+    <div class="view-chart" if="{{currentView === 'chart' && !isLoading}}" onswipe="handleSwipe">
+      <div class="global-header">
+        <text class="header-left">TOP {{topNCount}} 销量</text>
+        <text class="header-right">{{currentTime}}</text>
+      </div>
+      
+      <div class="chart-container">
+        <chart type="bar" options="{{barOpts}}" datasets="{{barData}}"></chart>
+      </div>
+
+      <div class="legend-container">
+        <div class="legend-item" for="{{legendData}}">
+          <div class="legend-color" style="background-color: {{$item.color}}"></div>
+          <text class="legend-text">{{$item.name}} ({{$item.count}})</text>
+        </div>
+      </div>
+    </div>
+
+    <div class="view-products" if="{{currentView === 'products' && !isLoading}}" onswipe="handleSwipe">
+      <div class="global-header">
+        <text class="header-left">售卖商品</text>
+        <text class="header-right">{{currentTime}}</text>
+      </div>
+      
+      <list class="product-list">
+        <list-item type="product" class="product-item" for="(index, item) in saleList" onclick="toggleProductData(index)">
+          <div class="product-info">
+            <text class="product-name">{{item.name}}</text>
+            <text class="badge {{item.can_buy_hide === 0 ? 'badge-hide' : 'badge-normal'}}">
+              {{item.can_buy_hide === 0 ? '已下架' : '在售'}}
+            </text>
+          </div>
+          <div class="product-data">
+            <text class="data-text">单价:￥{{item.price}}</text>
+            <text class="data-text highlight-small" if="{{item.displayMode === 0}}">销量:{{item.sponsor_count}}</text>
+            <text class="data-text highlight-small" elif="{{item.displayMode === 1}}">收入:￥{{item.total_amount}}</text>
+            <text class="data-text highlight-small" elif="{{item.displayMode === 2}}">利润:￥{{item.profit}}</text>
+          </div>
+        </list-item>
+        
+        <list-item type="spacer" class="spacer"></list-item>
+      </list>
+    </div>
+
+  </div>
+</template>
+
+<script>
+import fetch from '@system.fetch'
+import prompt from '@system.prompt'
+import storage from '@system.storage'
+import brightness from '@system.brightness'
+
+let CURRENT_COOKIE = "";
+const AFDIAN_API_URL = "https://afdian.com/api/creator/all-plans?post_only=&sale_only=&status=";
+const CHART_COLORS = [
+  '#e74c3c', '#3498db', '#f1c40f', '#2ecc71', '#9b59b6', '#e67e22', '#1abc9c',
+  '#FF6B6B', '#4ECDC4', '#A8E6CF', '#FF8B94', '#6C5B7B', '#C06C84', '#F67280'
+];
+
+export default {
+  private: {
+    // 【优化点1】初始不显示具体视图和loading，用空视图配合黑色底色过渡
+    currentView: 'init', 
+    isLoading: false,
+    processProgress: 0,
+    
+    // 扫码登录
+    serverBase: 'https://mfapi.mfoa.top/afdian_data_transfer/index.php', 
+    sid: '',
+    qrUrl: '',
+    statusMsg: '正在检查登录状态...',
+    pollTimer: null,
+    hasOldCookie: false,
+
+    // 顶部状态栏时间
+    currentTime: '00:00',
+    clockTimer: null,
+    topNCount: 0,
+
+    // 原型动画状态管理
+    angle: 0,
+    dotX: '40.0', 
+    dotY: '28.0', 
+    animTimer: null,
+    
+    // 主页动画引擎状态
+    mainOffsets: [400, 400, 400, 400],
+    mainAnimToken: 0,
+    numberAnimToken: 0,
+    
+    // 显示中的数字动画变量
+    displayRevenue: '0.00',
+    displaySales: 0,
+
+    // 实际核心数据
+    totalRevenue: '0.00',
+    totalSales: 0,
+    saleList: [],
+    sponsorList: [],
+
+    barData: [],
+    barOpts: {
+      xAxis: { min: 0, max: 7, display: false, axisTick: 7 },
+      yAxis: { min: 0, max: 800, display: false }
+    },
+    legendData: []
+  },
+
+  onInit() {
+    this.updateClock();
+    this.clockTimer = setInterval(() => { this.updateClock(); }, 60000);
+    this.initAuth(); 
+  },
+
+  onDestroy() {
+    if (this.clockTimer) {
+      clearInterval(this.clockTimer);
+      this.clockTimer = null;
+    }
+    this.clearPollTimer();
+    this.pauseAnim();
+    brightness.setKeepScreenOn({ keepScreenOn: false });
+  },
+
+  updateClock() {
+    const now = new Date();
+    const h = now.getHours().toString().padStart(2, '0');
+    const m = now.getMinutes().toString().padStart(2, '0');
+    this.currentTime = `${h}:${m}`;
+  },
+
+  // ============== 身份认证与通道 ==============
+  initAuth() {
+    // 【优化点2】移除默认的 this.isLoading = true，因为读取存储极快，不需要显示加载动画
+    storage.get({
+      key: 'afdian_user_cookie',
+      success: (data) => {
+        if (data && data !== '') {
+          CURRENT_COOKIE = data;
+          this.hasOldCookie = true;
+          // 【优化点3】直接走加载本地存储逻辑，让 loadFromStorage 在准备完毕后再渲染视图并播放动画
+          this.loadFromStorage();
+        } else {
+          this.goView('login');
+        }
+      },
+      fail: () => {
+        this.goView('login');
+      }
+    });
+  },
+
+  clearPollTimer() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+  },
+
+  initSecureSession() {
+    this.clearPollTimer()
+    this.qrUrl = ''
+    this.statusMsg = '正在请求通道...'
+    
+    fetch.fetch({
+      url: `${this.serverBase}?action=create`,
+      success: (res) => {
+        try {
+          const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+          if (data && data.sid) {
+            this.sid = data.sid
+            this.qrUrl = `${this.serverBase}?sid=${this.sid}`
+            this.statusMsg = '请使用手机扫码并输入 Cookie'
+            this.startPolling()
+          } else {
+            this.statusMsg = '服务器返回格式异常'
+          }
+        } catch (e) {
+          this.statusMsg = '数据解析失败'
+        }
+      },
+      fail: (data, code) => {
+        this.statusMsg = `网络错误: ${code}`
+      }
+    })
+  },
+
+  startPolling() {
+    this.pollTimer = setInterval(() => {
+      fetch.fetch({
+        url: `${this.serverBase}?action=poll&sid=${this.sid}`,
+        success: (res) => {
+          try {
+            const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+            if (data.status === 'success' && data.payload) {
+              this.clearPollTimer()
+              this.statusMsg = '【接收成功，正在保存】'
+              this.saveNewCookie(data.payload)
+            }
+          } catch (e) {}
+        }
+      })
+    }, 3000)
+  },
+
+  saveNewCookie(cookieStr) {
+    CURRENT_COOKIE = cookieStr;
+    storage.set({
+      key: 'afdian_user_cookie',
+      value: cookieStr,
+      success: () => {
+        prompt.showToast({ message: 'Cookie 绑定成功' });
+        this.hasOldCookie = true;
+        this.goView('main');
+        this.fetchData(); 
+      }
+    });
+  },
+
+  triggerManualReset() {
+    this.statusMsg = '正在请求通道...';
+    this.resetCookie();
+  },
+
+  resetCookie() {
+    // 1. 立即清空内存变量
+    CURRENT_COOKIE = '';
+    this.hasOldCookie = false;
+    // 2. 立即切回扫码界面，不让用户等待
+    this.goView('login');
+    if (this.statusMsg !== '正在请求通道...') {
+        this.statusMsg = '原 Cookie 已失效，请重新扫码';
+    }
+
+    // 3. 异步去底层擦除失效的存储记录
+    storage.delete({
+      key: 'afdian_user_cookie',
+      success: () => {
+        console.log('旧 Cookie 已从设备中彻底擦除');
+      }
+    });
+  },
+
+  // ============== 页面路由控制 ==============
+  handleSwipe(e) {
+    if (e.direction === 'right') {
+      this.goView('main');
+    }
+  },
+
+  goView(viewName) {
+    this.currentView = viewName;
+    if (viewName === 'chart') {
+      this.generateChartData();
+    } else if (viewName === 'main') {
+      this.playMainAnimation();
+    } else if (viewName === 'login') {
+      this.initSecureSession();
+    }
+  },
+
+  toggleProductData(index) {
+    let list = this.saleList;
+    let item = list[index];
+    item.displayMode = ((item.displayMode || 0) + 1) % 3; 
+    list.splice(index, 1, item);
+    this.saleList = list;
+  },
+
+  // ============== 动画逻辑 ==============
+  playMainAnimation() {
+    this.mainOffsets = [400, 400, 400, 400];
+    const duration = 500;
+    const stagger = 80;
+    const startTime = Date.now();
+    
+    this.mainAnimToken = startTime; 
+    const currentToken = this.mainAnimToken;
+    this.displayRevenue = '0.00';
+    this.displaySales = 0;
+
+    const animate = () => {
+      if (this.mainAnimToken !== currentToken || this.currentView !== 'main') return;
+      const elapsed = Date.now() - startTime;
+      let allDone = true;
+      const newOffsets = [];
+      for (let i = 0; i < 4; i++) {
+        const itemStart = i * stagger;
+        if (elapsed < itemStart) {
+          newOffsets.push(400);
+          allDone = false;
+        } else if (elapsed - itemStart < duration) {
+          const progress = (elapsed - itemStart) / duration;
+          const easeOut = 1 - Math.pow(1 - progress, 3);
+          newOffsets.push(Math.round(400 * (1 - easeOut)));
+          allDone = false;
+        } else {
+          newOffsets.push(0);
+        }
+      }
+      this.mainOffsets = newOffsets;
+      if (!allDone) {
+        setTimeout(animate, 16);
+      } else {
+        this.playNumberAnimation();
+      }
+    };
+    animate();
+  },
+
+  playNumberAnimation() {
+    const duration = 1500;
+    const startTime = Date.now();
+    
+    this.numberAnimToken = startTime;
+    const currentToken = this.numberAnimToken;
+    
+    const targetSales = this.totalSales;
+    const targetRevenue = parseFloat(this.totalRevenue);
+    const animate = () => {
+      if (this.numberAnimToken !== currentToken || this.currentView !== 'main') return;
+      const elapsed = Date.now() - startTime;
+      
+      if (elapsed < duration) {
+        const progress = elapsed / duration;
+        const easeOut = 1 - Math.pow(1 - progress, 3);
+        
+        this.displaySales = Math.round(targetSales * easeOut);
+        this.displayRevenue = (targetRevenue * easeOut).toFixed(2);
+        setTimeout(animate, 16);
+      } else {
+        this.displaySales = targetSales;
+        this.displayRevenue = targetRevenue.toFixed(2);
+      }
+    };
+    animate();
+  },
+
+  playAnim() {
+    if (this.animTimer) return;
+    this.animTimer = setInterval(() => {
+      this.angle += 8; 
+      if (this.angle >= 360) this.angle -= 360;
+      const rad = this.angle * Math.PI / 180;
+      const rawX = 28 + 12 * Math.cos(rad);
+      const rawY = 28 + 12 * Math.sin(rad);
+      this.dotX = rawX.toFixed(1);
+      this.dotY = rawY.toFixed(1);
+    }, 33);
+  },
+
+  pauseAnim() {
+    if (this.animTimer) {
+      clearInterval(this.animTimer);
+      this.animTimer = null;
+    }
+  },
+
+  // ============== 数据加载与解析逻辑 ==============
+  loadFromStorage() {
+    storage.get({
+      key: 'afdian_cache_pruned',
+      success: (data) => {
+        // 【优化点4】等待读取结果后再显式设置为 main 视图并播放一次动画，根除动画双重触发冲突
+        this.currentView = 'main'; 
+        if (data && data !== '') {
+          try {
+            let cached = JSON.parse(data);
+            this.saleList = cached.saleList || [];
+            this.sponsorList = cached.sponsorList || [];
+            this.totalSales = cached.totalSales || 0;
+            this.totalRevenue = cached.totalRevenue || '0.00';
+            this.playMainAnimation();
+          } catch (e) {
+            this.fetchData();
+          }
+        } else {
+          this.fetchData();
+        }
+      },
+      fail: () => {
+        this.currentView = 'main';
+        this.fetchData();
+      }
+    });
+  },
+
+  fetchData() {
+    if (!CURRENT_COOKIE) {
+      prompt.showToast({ message: '请先绑定 Cookie' });
+      this.goView('login');
+      return;
+    }
+
+    this.isLoading = true;
+    this.processProgress = 0;
+    
+    this.playAnim();
+    brightness.setKeepScreenOn({ keepScreenOn: true });
+    if (typeof global !== 'undefined' && global.runGC) {
+      global.runGC();
+    }
+    
+    fetch.fetch({
+      url: AFDIAN_API_URL,
+      method: 'GET',
+      header: {
+        'Content-Type': 'application/json',
+        'Cookie': CURRENT_COOKIE,
+        'User-Agent': 'Mozilla/5.0 (Windows) AppleWebKit/537.36 Chrome/122.0.0.0',
+        'referer': 'https://afdian.com/'
+      },
+      responseType: 'json',
+      success: (res) => {
+        try {
+          let result = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+          res.data = null; 
+          
+          if (result && result.ec === 200) {
+            this.chunkProcessData(result, true); 
+          } else {
+            this.isLoading = false;
+            this.pauseAnim();
+            brightness.setKeepScreenOn({ keepScreenOn: false });
+            
+            let errMsg = result ? result.em : '未知错误';
+            prompt.showToast({ message: '接口报错: ' + errMsg });
+            
+            if (
+              errMsg.includes('登录') || 
+              errMsg.includes('登陆') ||
+              errMsg.includes('重新') || 
+              errMsg.includes('权限') || 
+              errMsg.includes('过期') || 
+              (result && result.ec === 401)
+            ) {
+              this.resetCookie();
+            }
+          }
+        } catch(e) {
+          this.isLoading = false;
+          this.pauseAnim();
+          brightness.setKeepScreenOn({ keepScreenOn: false });
+          prompt.showToast({ message: 'JSON 解析错误' });
+        }
+      },
+      fail: (data, code) => {
+        this.isLoading = false;
+        this.pauseAnim();
+        brightness.setKeepScreenOn({ keepScreenOn: false });
+        prompt.showToast({ message: '网络失败, 错误码:' + code });
+      }
+    });
+  },
+
+  chunkProcessData(json_data, shouldCache) {
+    let raw_sale_list = (json_data.data && json_data.data.sale_list) ? json_data.data.sale_list : [];
+    let raw_sponsor_list = (json_data.data && json_data.data.list) ? json_data.data.list : [];
+    json_data = null; 
+
+    let tempSaleList = [];
+    let tempSponsorList = [];
+    let tempSales = 0;
+    let tempRev = 0;
+    
+    let saleIdx = 0;
+    let sponsorIdx = 0;
+    let totalItems = raw_sale_list.length + raw_sponsor_list.length;
+    
+    if (totalItems === 0) {
+      this.finalizeData([], [], 0, 0, shouldCache);
+      return;
+    }
+
+    const CHUNK_SIZE = 15;
+
+    const processNextChunk = () => {
+      let processedInThisChunk = 0;
+      while (saleIdx < raw_sale_list.length && processedInThisChunk < CHUNK_SIZE) {
+        let item = raw_sale_list[saleIdx];
+        if (item) {
+          let sCount = parseInt(item.sponsor_count || 0);
+          let tAmount = parseFloat(item.total_amount || 0);
+          tempSales += sCount;
+          tempRev += tAmount;
+          tempSaleList.push({
+            name: item.name || '未命名',
+            price: item.price || '0.00',
+            sponsor_count: sCount,
+            total_amount: tAmount.toFixed(2),
+            profit: (tAmount * 0.94).toFixed(2), 
+            can_buy_hide: item.can_buy_hide !== undefined ? parseInt(item.can_buy_hide) : 1,
+            displayMode: 0 
+          });
+          raw_sale_list[saleIdx] = null;
+        }
+        saleIdx++;
+        processedInThisChunk++;
+      }
+
+      while (saleIdx >= raw_sale_list.length && sponsorIdx < raw_sponsor_list.length && processedInThisChunk < CHUNK_SIZE) {
+        let item = raw_sponsor_list[sponsorIdx];
+        if (item) {
+          let sCount = parseInt(item.sponsor_count || 0);
+          let tAmount = parseFloat(item.total_amount || 0);
+          tempSales += sCount;
+          tempRev += tAmount;
+          tempSponsorList.push({
+            name: item.name || '未命名',
+            price: item.price || '0.00',
+            sponsor_count: sCount,
+            total_amount: tAmount.toFixed(2),
+            profit: (tAmount * 0.94).toFixed(2),
+            can_buy_hide: item.can_buy_hide !== undefined ? parseInt(item.can_buy_hide) : 1,
+            displayMode: 0
+          });
+          raw_sponsor_list[sponsorIdx] = null;
+        }
+        sponsorIdx++;
+        processedInThisChunk++;
+      }
+
+      let currentTotal = saleIdx + sponsorIdx;
+      this.processProgress = Math.floor((currentTotal / totalItems) * 100);
+      if (typeof global !== 'undefined' && global.runGC) {
+        global.runGC();
+      }
+
+      if (currentTotal < totalItems) {
+        setTimeout(processNextChunk, 30);
+      } else {
+        this.finalizeData(tempSaleList, tempSponsorList, tempSales, tempRev, shouldCache);
+      }
+    };
+    processNextChunk();
+  },
+
+  finalizeData(parsedSales, parsedSponsors, sales, rev, shouldCache) {
+    this.saleList = parsedSales;
+    this.sponsorList = parsedSponsors;
+    this.totalSales = sales;
+    this.totalRevenue = rev.toFixed(2);
+    
+    if (shouldCache) {
+      storage.set({
+        key: 'afdian_cache_pruned',
+        value: JSON.stringify({
+          saleList: this.saleList,
+          sponsorList: this.sponsorList,
+          totalSales: this.totalSales,
+          totalRevenue: this.totalRevenue
+        })
+      });
+    }
+
+    this.isLoading = false;
+    this.pauseAnim();
+    brightness.setKeepScreenOn({ keepScreenOn: false });
+    
+    prompt.showToast({ message: '同步完成' });
+    if (this.currentView === 'chart') {
+      this.generateChartData();
+    } else if (this.currentView === 'main') {
+      this.playMainAnimation();
+    }
+  },
+
+  generateChartData() {
+    if (this.saleList.length === 0) {
+      this.topNCount = 0;
+      return;
+    }
+
+    let maxDisplay = 7;
+    let topItems = [...this.saleList]
+      .sort((a, b) => b.sponsor_count - a.sponsor_count)
+      .slice(0, maxDisplay);
+    this.topNCount = topItems.length;
+
+    let maxSales = 10;
+    let newDatasets = [];
+    let newLegends = [];
+    topItems.forEach((item, index) => {
+      if (item.sponsor_count > maxSales) {
+        maxSales = item.sponsor_count;
+      }
+      
+      let dataArray = new Array(topItems.length).fill(0);
+      dataArray[index] = item.sponsor_count;
+      let color = CHART_COLORS[index % CHART_COLORS.length];
+
+      newDatasets.push({
+        fillColor: color,
+        data: dataArray
+      });
+
+      newLegends.push({
+        name: item.name.length > 8 ? item.name.substring(0, 8) + '..' : item.name,
+        count: item.sponsor_count,
+        color: color
+      });
+    });
+    this.barData = newDatasets;
+    this.legendData = newLegends;
+    
+    this.barOpts = {
+      xAxis: { min: 0, max: topItems.length, display: false, axisTick: topItems.length },
+      yAxis: { min: 0, max: Math.ceil(maxSales * 1.2), display: false }
+    };
+  }
+}
+</script>
+
+<style>
+  /* ========== 全局与基础容器 ========== */
+  .page-container {
+    flex-direction: column;
+    width: 432px;
+    height: 514px;
+    background-color: #000000;
+    align-items: center;
+  }
+
+  .view-loading, .view-main, .view-chart, .view-products, .view-login {
+    flex-direction: column;
+    align-items: center;
+    width: 432px;
+    height: 514px;
+  }
+
+  /* ========== 统一个性化状态栏 ========== */
+  .global-header {
+    flex-direction: row;
+    width: 392px;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 25px;
+    margin-bottom: 15px;
+  }
+  
+  .header-left {
+    font-size: 32px;
+    color: #ffffff;
+    font-weight: bold;
+    margin-left: 27px;
+  }
+  
+  .header-right {
+    font-size: 32px;
+    color: #ffffff;
+    font-weight: bold;
+    margin-right: 27px;
+  }
+
+  /* ========== 新增：扫码登录区 ========== */
+  .login-container {
+    flex: 1;
+    width: 432px;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 20px;
+  }
+  .qrcode {
+    width: 240px;
+    height: 240px;
+    margin-bottom: 20px;
+    background-color: #ffffff;
+    border-radius: 12px;
+  }
+  .qr-placeholder {
+    width: 240px;
+    height: 240px;
+    margin-bottom: 20px;
+    background-color: #1a1a1a;
+    border-radius: 12px;
+    justify-content: center;
+    align-items: center;
+  }
+  .loading-text {
+    color: #7e5fd9;
+    font-size: 20px;
+  }
+  .status-msg {
+    color: #aaaaaa;
+    font-size: 22px;
+    margin-bottom: 10px;
+  }
+
+  /* ========== JS Loading 动画区域 ========== */
+  .view-loading {
+    justify-content: center;
+  }
+
+  .dialog-bg {
+    width: 350px;
+    height: 250px;
+    background-color: #1a1a1a;
+    border-radius: 40px;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .loading-title {
+    font-size: 26px;
+    color: #ffffff;
+    font-weight: bold;
+    margin-top: 20px;
+  }
+
+  .loading-content {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .circle-stack {
+    width: 70px;
+    height: 70px;
+  }
+
+  .outer-ring {
+    width: 70px;
+    height: 70px;
+    border-width: 8px;
+    border-color: #ffffff;
+    border-radius: 35px;
+  }
+
+  .inner-dot {
+    width: 14px;
+    height: 14px;
+    background-color: #ffffff; 
+    border-radius: 7px;
+  }
+
+  /* ========== 1. 看板区域 ========== */
+  .dashboard {
+    flex-direction: row;
+    width: 392px;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .dashboard-secondary {
+    margin-bottom: 20px;
+  }
+
+  .stat-box {
+    flex-direction: column;
+    width: 190px;
+    background-color: #1a1a1a;
+    border-radius: 16px;
+    padding: 15px 0;
+    align-items: center;
+  }
+  
+  .clickable-box {
+    border: 2px solid #7e5fd95e;
+  }
+
+  .stat-title {
+    font-size: 20px;
+    color: #aaaaaa;
+    margin-bottom: 5px;
+  }
+
+  .stat-value {
+    font-size: 36px;
+    color: #ffffff;
+    font-weight: bold;
+  }
+  .stat-value-small {
+    font-size: 28px;
+    color: #dddddd;
+  }
+  
+  .highlight { color: #e74c3c; }
+  .highlight-small { color: #e74c3c; }
+
+  /* ========== 2. 按钮与交互区 ========== */
+  .action-area {
+    flex-direction: column;
+    width: 392px;
+    align-items: center;
+  }
+  
+  .btn {
+    width: 392px;
+    height: 60px;
+    background-color: #7e5fd9;
+    border-radius: 30px;
+    color: #ffffff;
+    font-size: 26px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 15px;
+  }
+
+  .qrbtn {
+    width: 200px;
+    height: 74px;
+    border-radius: 30px;
+    color: #ffffff;
+    font-size: 26px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 15px;
+  }
+  
+  .btn-secondary {
+    background-color: #7e5fd957;
+  }
+
+  /* ========== 3. 图表渲染区 ========== */
+  .chart-container {
+    width: 392px;
+    height: 200px;
+    background-color: #111111;
+    border-radius: 12px;
+    margin-bottom: 15px;
+  }
+
+  .legend-container {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 392px;
+    justify-content: flex-start;
+  }
+
+  .legend-item {
+    flex-direction: row;
+    align-items: center;
+    width: 190px;
+    margin-bottom: 10px;
+    margin-right: 5px;
+  }
+
+  .legend-color {
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    margin-right: 8px;
+  }
+
+  .legend-text {
+    font-size: 18px;
+    color: #cccccc;
+    lines: 1;
+    text-overflow: ellipsis;
+  }
+
+  /* ========== 4. 列表滚动区 ========== */
+  .product-list {
+    width: 432px;
+    height: 400px;
+    flex-direction: column;
+  }
+
+  .product-item {
+    width: 410px;
+    height: 110px;
+    margin-bottom: 12px;
+    margin-left: 11px;
+    background-color: #262626;
+    border-radius: 30px;
+    flex-direction: column;
+    padding: 15px 25px;
+  }
+
+  .product-info {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    width: 360px;
+    margin-bottom: 5px;
+  }
+
+  .product-name {
+    font-size: 26px;
+    color: #ffffff;
+    font-weight: bold;
+    width: 240px;
+    lines: 1;
+    text-overflow: ellipsis;
+  }
+
+  .product-data {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    width: 360px;
+  }
+
+  .data-text {
+    font-size: 22px;
+    color: #cccccc;
+  }
+
+  .badge {
+    font-size: 20px;
+    border-radius: 10px;
+    padding: 2px 10px;
+  }
+  .badge-normal { color: #27ae60; }
+  .badge-hide { color: #c0392b; }
+  
+  .spacer {
+    height: 60px;
+    width: 432px;
+  }
+</style>

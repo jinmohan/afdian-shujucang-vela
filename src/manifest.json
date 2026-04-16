@@ -1,0 +1,43 @@
+{
+  "package": "com.afdian.matrixfive",
+  "name": "爱发电数据仓",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minPlatformVersion": 1000,
+  "icon": "/common/logo.png",
+  "deviceTypeList": [
+    "watch"
+  ],
+  "features": [
+    {
+      "name": "system.router"
+    },
+    {
+      "name": "system.fetch"
+    },
+    {
+      "name": "system.prompt"
+    },
+    {
+      "name": "system.storage"
+    },
+    {
+      "name": "system.crypto"
+    },
+    {
+      "name": "system.brightness"
+    }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": "device-width"
+  },
+  "router": {
+    "entry": "pages/index",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      }
+    }
+  }
+}
